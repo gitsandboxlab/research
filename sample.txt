@@ -1,1 +1,25 @@
+import json
 
+fields = {}
+
+with open("data.ndjson") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        record = json.loads(line)
+
+        def walk(obj, prefix=""):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    path = f"{prefix}.{k}" if prefix else k
+                    fields[path] = fields.get(path, 0) + 1
+                    walk(v, path)
+            elif isinstance(obj, list):
+                for item in obj:
+                    walk(item, prefix)  # arrays collapse to same path
+
+        walk(record)
+
+for path, count in sorted(fields.items()):
+    print(f"{path}\t{count}")
