@@ -1,0 +1,9 @@
+1
+Set a query governor cost limit
+sp_configure 'show advanced options', 1; RECONFIGURE; sp_configure 'query governor cost limit', 300; RECONFIGURE; — SQL Server will refuse to run any query whose estimated cost exceeds this threshold, before it even starts. Tune the number based on your normal workload's typical cost so legitimate queries aren't blocked.
+2
+Cap memory grants with Resource Governor
+Use Resource Governor to create a workload group (e.g. 'AdHocQueries') with a REQUEST_MAX_MEMORY_GRANT_PERCENT cap (e.g. 10-15%) and route ad-hoc/linked-server sessions into it via a classifier function. This caps how much memory any single query in that group can ever request, regardless of size.
+3
+Add a long-running-query auto-kill or alert
+Create an Agent Alert (or Extended Events session) that fires when a query's total_elapsed_time exceeds a threshold (e.g. 1 hour) and either notifies you or automatically calls KILL on that session_id. This stops a runaway job before it gets to hour 6.
