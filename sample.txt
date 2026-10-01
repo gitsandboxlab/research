@@ -1,18 +1,177 @@
-That's from Microsoft's own documented list for extension install/query/update specifically:
+import pandas as pd
+import tableauserverclient as TSC
+from sqlalchemy import create_engine, text
 
-marketplace.visualstudio.com — Marketplace API (search, install requests)
-*.gallery.vsassets.io — extension package downloads
-*.gallerycdn.vsassets.io — extension asset CDN
-*.vscode-unpkg.net — fallback/web extension loading
+# ---------------------------------------------------------------- settings
+TS_URL = "https://tableau.yourcorp.local"
+PAT_NAME = "admin-extract"
+PAT_SECRET = "changeme"
 
-VS Code itself:
+REPO_HOST = "tableau-node1.yourcorp.local"
+REPO_PASSWORD = "changeme"          # readonly user password
+LOOKBACK_DAYS = 30                  # for event tables
 
-%LocalAppData%\Programs\Microsoft VS Code\ (install directory)
-%USERPROFILE%\.vscode\extensions\ (installed extensions)
-%AppData%\Code\ (user settings/workspace storage)
+dfs = {}                            # every table ends up here: dfs["repo_users"], etc.
 
-Python:
+# ---------------------------------------------------------------- repository
+pg = create_engine(f"postgresql+psycopg2://readonly:{REPO_PASSWORD}@{REPO_HOST}:8060/workgroup")
 
-Python install directory (e.g. C:\Python3x\ or %LocalAppData%\Programs\Python\)
-Your virtual environment folders — wherever you create them (e.g. <project>\.venv\ or <project>\venv\)
-%LocalAppData%\pip\Cache\ (pip download/build cache)
+queries = {
+    "repo_users": """
+        SELECT u.id AS user_id, su.name AS username, su.friendly_name, su.email,
+               s.name AS site_name, sr.name AS site_role, u.login_at AS last_login_at,
+               su.created_at, su.admin_level
+        FROM users u
+        JOIN system_users su ON su.id = u.system_user_id
+        JOIN sites s ON s.id = u.site_id
+        LEFT JOIN site_roles sr ON sr.id = u.site_role_id""",
+
+    "repo_workbooks": """
+        SELECT w.id AS workbook_id, w.luid, w.name, w.repository_url,
+               s.name AS site_name, p.name AS project_name, su.name AS owner_username,
+               w.created_at, w.updated_at, w.size
+        FROM workbooks w
+        JOIN sites s ON s.id = w.site_id
+        JOIN projects p ON p.id = w.project_id
+        LEFT JOIN users u ON u.id = w.owner_id
+        LEFT JOIN system_users su ON su.id = u.system_user_id""",
+
+    "repo_views": """
+        SELECT v.id AS view_id, v.luid, v.name, v.repository_url, v.sheettype,
+               v.workbook_id, w.name AS workbook_name, s.name AS site_name, v.created_at
+        FROM views v
+        JOIN workbooks w ON w.id = v.workbook_id
+        JOIN sites s ON s.id = v.site_id""",
+
+    "repo_datasources": """
+        SELECT d.id AS datasource_id, d.luid, d.name, d.repository_url,
+               s.name AS site_name, p.name AS project_name, su.name AS owner_username,
+               d.parent_workbook_id, d.is_certified, d.created_at, d.updated_at, d.size
+        FROM datasources d
+        JOIN sites s ON s.id = d.site_id
+        LEFT JOIN projects p ON p.id = d.project_id
+        LEFT JOIN users u ON u.id = d.owner_id
+        LEFT JOIN system_users su ON su.id = u.system_user_id""",
+
+    "repo_view_stats": """
+        SELECT vs.view_id, vs.user_id, vs.nviews, vs.time AS last_viewed_at,
+               vs.device_type, s.name AS site_name
+        FROM views_stats vs
+        JOIN sites s ON s.id = vs.site_id""",
+
+    "repo_historical_events": f"""
+        SELECT he.id AS event_id, he.created_at, het.name AS event_type, het.action_type,
+               hu.name AS actor_username, hs.name AS site_name, hw.name AS workbook_name,
+               hv.name AS view_name, hd.name AS datasource_name,
+               he.duration_in_ms, he.is_failure
+        FROM historical_events he
+        JOIN historical_event_types het ON het.type_id = he.historical_event_type_id
+        LEFT JOIN hist_users hu ON hu.id = he.hist_actor_user_id
+        LEFT JOIN hist_sites hs ON hs.id = he.hist_actor_site_id
+        LEFT JOIN hist_workbooks hw ON hw.id = he.hist_workbook_id
+        LEFT JOIN hist_views hv ON hv.id = he.hist_view_id
+        LEFT JOIN hist_datasources hd ON hd.id = he.hist_datasource_id
+        WHERE he.created_at > now() - interval '{LOOKBACK_DAYS} days'""",
+
+    "repo_http_requests": f"""
+        SELECT id AS request_id, created_at, completed_at, controller, action,
+               currentsheet, status, user_id, site_id, vizql_session, user_ip
+        FROM http_requests
+        WHERE created_at > now() - interval '{LOOKBACK_DAYS} days'""",
+
+    "repo_background_jobs": f"""
+        SELECT bj.id AS job_id, bj.job_name, bj.title, bj.subtitle, bj.created_at,
+               bj.started_at, bj.completed_at, bj.finish_code, bj.notes, s.name AS site_name
+        FROM background_jobs bj
+        LEFT JOIN sites s ON s.id = bj.site_id
+        WHERE bj.created_at > now() - interval '{LOOKBACK_DAYS} days'""",
+}
+
+with pg.connect() as conn:
+    for name, sql in queries.items():
+        dfs[name] = pd.read_sql(text(sql), conn)
+        print(f"{name}: {len(dfs[name])} rows")
+
+# ---------------------------------------------------------------- REST + Metadata API
+lineage_query = """
+query lineage($first: Int, $after: String) {
+  workbooksConnection(first: $first, after: $after) {
+    nodes {
+      luid name projectName
+      owner { username }
+      upstreamDatasources { luid name }
+      upstreamTables { name schema fullName database { name connectionType } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
+
+users, groups, members, views, lineage = [], [], [], [], []
+
+server = TSC.Server(TS_URL, use_server_version=True)
+# server.add_http_options({"verify": False})   # uncomment for self-signed certs
+
+with server.auth.sign_in(TSC.PersonalAccessTokenAuth(PAT_NAME, PAT_SECRET, site_id="")):
+    for site in list(TSC.Pager(server.sites)):
+        server.auth.switch_site(site)
+        print(f"site: {site.name}")
+
+        for u in TSC.Pager(server.users):
+            users.append({"site_name": site.name, "user_luid": u.id, "username": u.name,
+                          "full_name": u.fullname, "email": u.email, "site_role": u.site_role,
+                          "auth_setting": u.auth_setting, "last_login": u.last_login})
+
+        for g in TSC.Pager(server.groups):
+            groups.append({"site_name": site.name, "group_luid": g.id, "group_name": g.name,
+                           "domain_name": g.domain_name, "minimum_site_role": g.minimum_site_role})
+            server.groups.populate_users(g)
+            for m in g.users:
+                members.append({"site_name": site.name, "group_luid": g.id, "group_name": g.name,
+                                "user_luid": m.id, "username": m.name})
+
+        for v in TSC.Pager(lambda opts: server.views.get(opts, usage=True)):
+            views.append({"site_name": site.name, "view_luid": v.id, "view_name": v.name,
+                          "workbook_luid": v.workbook_id, "owner_luid": v.owner_id,
+                          "content_url": v.content_url, "total_views": v.total_views,
+                          "created_at": v.created_at, "updated_at": v.updated_at})
+
+        # Metadata API lineage (skipped if not enabled on the server)
+        try:
+            after = None
+            while True:
+                resp = server.metadata.query(lineage_query, variables={"first": 100, "after": after})
+                page = resp["data"]["workbooksConnection"]
+                for wb in page["nodes"]:
+                    for t in wb["upstreamTables"] or [{}]:
+                        db = t.get("database") or {}
+                        lineage.append({
+                            "site_name": site.name,
+                            "workbook_luid": wb["luid"],
+                            "workbook_name": wb["name"],
+                            "project_name": wb["projectName"],
+                            "owner_username": (wb.get("owner") or {}).get("username"),
+                            "published_datasources": ", ".join(d["name"] for d in wb["upstreamDatasources"]),
+                            "table_name": t.get("name"),
+                            "table_schema": t.get("schema"),
+                            "table_full_name": t.get("fullName"),
+                            "database_name": db.get("name"),
+                            "connection_type": db.get("connectionType"),
+                        })
+                if not page["pageInfo"]["hasNextPage"]:
+                    break
+                after = page["pageInfo"]["endCursor"]
+        except Exception as e:
+            print(f"  metadata API skipped: {e}")
+
+dfs["api_users"] = pd.DataFrame(users)
+dfs["api_groups"] = pd.DataFrame(groups)
+dfs["api_group_members"] = pd.DataFrame(members)
+dfs["api_view_usage"] = pd.DataFrame(views)
+dfs["api_workbook_lineage"] = pd.DataFrame(lineage)
+
+for name, df in dfs.items():
+    print(f"{name}: {len(df)} rows")
+
+# ---------------------------------------------------------------- your load goes here
+# for name, df in dfs.items():
+#     ...
