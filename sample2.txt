@@ -1,25 +1,61 @@
-SELECT
-    r.session_id,
-    r.start_time,
-    DATEDIFF(MINUTE, r.start_time, GETDATE()) / 60.0 AS hours_running,
-    r.status,
-    r.command,
-    r.database_id,
-    DB_NAME(r.database_id) AS database_name,
-    r.blocking_session_id,
-    r.wait_type,
-    r.wait_time,
-    r.cpu_time,
-    r.total_elapsed_time,
-    r.reads,
-    r.writes,
-    r.logical_reads,
-    s.login_name,
-    s.host_name,
-    s.program_name,
-    t.text AS query_text
-FROM sys.dm_exec_requests r
-JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
-CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
-WHERE DATEDIFF(MINUTE, r.start_time, GETDATE()) >= 60 * 4  -- change 4 to your X hours
-ORDER BY r.start_time ASC;
+import pandas as pd
+from sqlalchemy import create_engine, text
+
+# ---------------------------------------------------------------- settings
+REPO_HOST = "tableau-node1.yourcorp.local"
+REPO_PASSWORD = "changeme"          # readonly user password
+LOOKBACK_DAYS = 30                  # for the large event tables
+
+# Keys stripped from every record before it leaves the server.
+# Removing a key that doesn't exist is a no-op, so this is safe on every table.
+EXCLUDE_KEYS = "ARRAY['password', 'hashed_password', 'salt']"
+
+# Pulled in full every run
+full_tables = [
+    "sites", "system_users", "users", "site_roles", "groups", "group_users",
+    "projects", "workbooks", "views", "datasources", "data_connections",
+    "tags", "taggings", "customized_views",
+    "views_stats",
+    "tasks", "schedules", "subscriptions", "extracts",
+    "next_gen_permissions", "capabilities",
+    "historical_event_types", "hist_users", "hist_sites", "hist_projects",
+    "hist_workbooks", "hist_views", "hist_datasources", "hist_groups",
+]
+
+# Pulled by date window: table -> filter column
+incremental_tables = {
+    "historical_events": "created_at",
+    "http_requests": "created_at",
+    "background_jobs": "created_at",
+}
+
+# ---------------------------------------------------------------- extract
+engine = create_engine(f"postgresql+psycopg2://readonly:{REPO_PASSWORD}@{REPO_HOST}:8060/workgroup")
+raw_datetime = pd.Timestamp.utcnow().tz_localize(None)   # when this job ran (UTC), same for every row
+dfs = {}
+
+all_tables = [(t, "") for t in full_tables] + [
+    (t, f"WHERE t.{col} > now() - interval '{LOOKBACK_DAYS} days'")
+    for t, col in incremental_tables.items()
+]
+
+with engine.connect() as conn:
+    for table, where in all_tables:
+        sql = f"""
+            SELECT '{table}'                                  AS "SourceTable",
+                   clock_timestamp() AT TIME ZONE 'UTC'       AS "SourceDateTime",
+                   (to_jsonb(t) - {EXCLUDE_KEYS})::text       AS "JsonRecord"
+            FROM public.{table} t {where}"""
+        try:
+            df = pd.read_sql(text(sql), conn)
+            df.insert(0, "RawDateTime", raw_datetime)
+            dfs[table] = df
+            print(f"{table}: {len(df)} rows")
+        except Exception as e:
+            conn.rollback()     # clear the failed transaction so the next query runs
+            print(f"{table}: SKIPPED ({e.__class__.__name__}: {str(e).splitlines()[0]})")
+
+# Each dfs[table] has columns: RawDateTime | SourceTable | SourceDateTime | JsonRecord
+# ---------------------------------------------------------------- your load goes here
+# for name, df in dfs.items():
+#     ...
