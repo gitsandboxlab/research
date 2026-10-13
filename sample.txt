@@ -1,14 +1,27 @@
+import json
 import pandas as pd
 from pathlib import Path
 from datetime import date, datetime
 
 
-def save_ndjson(df: pd.DataFrame, base_folder: str, run_date: date, file_name: str,
-                extension: str = ".json") -> Path:
+def archive_file(data, base_folder: str, run_date: date, file_name: str,
+                 file_type: str = "json") -> Path:
     """
-    Save a DataFrame of NDJSON records (one JSON string per row, single column)
-    to base_folder/YYYY/MM/DD/file_name<extension>.
+    Save data to base_folder/YYYY/MM/DD/file_name_YYYYMMDD.<file_type>.
     base_folder must already exist. Date folders are created if needed. Existing file is overwritten.
+    If file_name includes an extension (e.g. "users.csv"), it overrides file_type.
+
+    file_type "json":
+      - DataFrame  -> NDJSON, first column holds one JSON string per row
+      - dict/list  -> single JSON document
+      - str        -> raw text, written as-is
+    file_type "csv":
+      - DataFrame  -> CSV with header, no index
+      - str        -> raw text, written as-is
+    file_type "txt":
+      - str        -> raw text, written as-is
+      - list       -> one item per line
+      - DataFrame  -> first column, one value per line
     """
     base = Path(base_folder)
     if not base.is_dir():
@@ -20,13 +33,46 @@ def save_ndjson(df: pd.DataFrame, base_folder: str, run_date: date, file_name: s
     folder = base / f"{run_date:%Y}" / f"{run_date:%m}" / f"{run_date:%d}"
     folder.mkdir(parents=True, exist_ok=True)
 
-    if not Path(file_name).suffix:
-        file_name = f"{file_name}{extension}"
-    path = folder / file_name
+    stem = Path(file_name).stem
+    suffix = Path(file_name).suffix
+    if suffix:
+        file_type = suffix.lstrip(".")
+    file_type = file_type.lower()
+    path = folder / f"{stem}_{run_date:%Y%m%d}.{file_type}"
 
-    json_column = df.columns[0]
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        for line in df[json_column]:
-            f.write(f"{line}\n")
+    if isinstance(data, str):
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(data)
+        return path
+
+    if file_type == "json":
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            if isinstance(data, pd.DataFrame):
+                json_column = data.columns[0]
+                for line in data[json_column]:
+                    f.write(f"{line}\n")
+            elif isinstance(data, (dict, list)):
+                json.dump(data, f, ensure_ascii=False, default=str)
+            else:
+                raise TypeError(f"json: unsupported data type {type(data).__name__}")
+
+    elif file_type == "csv":
+        if not isinstance(data, pd.DataFrame):
+            raise TypeError(f"csv: expected DataFrame or str, got {type(data).__name__}")
+        data.to_csv(path, index=False, encoding="utf-8", lineterminator="\n")
+
+    elif file_type == "txt":
+        if isinstance(data, pd.DataFrame):
+            lines = data[data.columns[0]]
+        elif isinstance(data, list):
+            lines = data
+        else:
+            raise TypeError(f"txt: unsupported data type {type(data).__name__}")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            for line in lines:
+                f.write(f"{line}\n")
+
+    else:
+        raise ValueError(f"Unsupported file_type: {file_type}")
 
     return path
