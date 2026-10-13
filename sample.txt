@@ -1,4 +1,5 @@
 import json
+import time
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ def _lp_post(cid: int, provhash: str, cmd: str, data: dict | None = None) -> dic
         payload["data"] = data
 
     r = requests.post(LP_URL, json=payload, timeout=300)
+    time.sleep(1)  # throttle to avoid LastPass rate limiting
     r.raise_for_status()
 
     if not r.text.strip():
@@ -26,10 +28,16 @@ def _lp_post(cid: int, provhash: str, cmd: str, data: dict | None = None) -> dic
     return body
 
 
+def _to_json_df(records: list[dict]) -> pd.DataFrame:
+    """One row per record, single column 'json'."""
+    json_rows = [json.dumps(r, sort_keys=True, default=str) for r in records]
+    return pd.DataFrame({"json": json_rows})
+
+
 def fetch_lastpass_logs(cid: int, provhash: str, start: datetime, end: datetime,
                         window_hours: int = 6, user: str = "", search: str = "") -> pd.DataFrame:
     """Reporting events between start and end. Times are in the LastPass account timezone."""
-    rows = []
+    records = []
     t = start
     while t < end:
         t_end = min(t + timedelta(hours=window_hours), end)
@@ -45,7 +53,9 @@ def fetch_lastpass_logs(cid: int, provhash: str, start: datetime, end: datetime,
             events = body.get("events") or body.get("data") or []
             if isinstance(events, dict):
                 events = list(events.values())
-            rows.extend(events)
+            for e in events:
+                e.pop("id", None)  # positional, not a real ID
+                records.append(e)
 
             nxt = body.get("next")
             if not nxt:
@@ -53,77 +63,47 @@ def fetch_lastpass_logs(cid: int, provhash: str, start: datetime, end: datetime,
             data["next"] = nxt
         t = t_end
 
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.drop(columns=["id"], errors="ignore")
-        df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
-        df = df.drop_duplicates().sort_values("Time").reset_index(drop=True)
+    df = _to_json_df(records)
+    df = df.drop_duplicates().reset_index(drop=True)  # window edges can overlap
     return df
 
 
 def fetch_lastpass_users(cid: int, provhash: str) -> pd.DataFrame:
-    """One row per user."""
+    """One record per user."""
     body = _lp_post(cid, provhash, "getuserdata", {})
     user_data = body.get("Users") or {}
 
-    rows = []
+    records = []
     for uid, u in user_data.items():
-        row = {"uid": uid}
-        row.update(u)
-        rows.append(row)
-
-    df = pd.DataFrame(rows)
-    if not df.empty and "groups" in df.columns:
-        df["groups"] = df["groups"].apply(json.dumps)  # land as JSON string
-    return df
+        record = {"uid": uid}
+        record.update(u)
+        records.append(record)
+    return _to_json_df(records)
 
 
 def fetch_lastpass_groups(cid: int, provhash: str) -> pd.DataFrame:
-    """One row per group/member. Empty groups kept with username = None."""
+    """One record per group with its member list."""
     body = _lp_post(cid, provhash, "getuserdata", {})
     group_data = body.get("Groups") or {}
 
-    rows = []
+    records = []
     for groupname, members in group_data.items():
-        if not members:
-            rows.append({"groupname": groupname, "username": None})
-            continue
-        for username in members:
-            rows.append({"groupname": groupname, "username": username})
-
-    return pd.DataFrame(rows, columns=["groupname", "username"])
+        records.append({"groupname": groupname, "members": members or []})
+    return _to_json_df(records)
 
 
 def fetch_lastpass_folders(cid: int, provhash: str) -> pd.DataFrame:
-    """One row per shared folder."""
+    """One record per shared folder, users and permissions nested."""
     body = _lp_post(cid, provhash, "getsfdata")
 
-    rows = []
+    records = []
     for shareid, f in body.items():
         if not isinstance(f, dict):
             continue
-        rows.append({
-            "shareid": shareid,
-            "sharedfoldername": f.get("sharedfoldername"),
-            "score": f.get("score"),
-            "deleted": f.get("deleted"),
-        })
-    return pd.DataFrame(rows)
-
-
-def fetch_lastpass_folder_users(cid: int, provhash: str) -> pd.DataFrame:
-    """One row per shared folder/user with permissions."""
-    body = _lp_post(cid, provhash, "getsfdata")
-
-    rows = []
-    for shareid, f in body.items():
-        if not isinstance(f, dict):
-            continue
-        for u in f.get("users") or []:
-            row = {"shareid": shareid}
-            row.update(u)
-            rows.append(row)
-    return pd.DataFrame(rows)
+        record = {"shareid": shareid}
+        record.update(f)
+        records.append(record)
+    return _to_json_df(records)
 
 
 if __name__ == "__main__":
@@ -136,12 +116,8 @@ if __name__ == "__main__":
     users = fetch_lastpass_users(cid, provhash)
     groups = fetch_lastpass_groups(cid, provhash)
     folders = fetch_lastpass_folders(cid, provhash)
-    folder_users = fetch_lastpass_folder_users(cid, provhash)
 
-    print("logs", logs.shape)
-    print("users", users.shape)
-    print("groups", groups.shape)
-    print("folders", folders.shape)
-    print("folder_users", folder_users.shape)
-
-    logs_ndjson = logs.to_json(orient="records", lines=True, date_format="iso")
+    print(logs.head())
+    print(users.head())
+    print(groups.head())
+    print(folders.head())
