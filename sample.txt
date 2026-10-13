@@ -1,123 +1,32 @@
-import json
-import time
-import requests
 import pandas as pd
-from datetime import datetime, timedelta
-
-LP_URL = "https://lastpass.com/enterpriseapi.php"
-
-
-def _lp_post(cid: int, provhash: str, cmd: str, data: dict | None = None) -> dict:
-    payload = {"cid": cid, "provhash": provhash, "cmd": cmd}
-    if data is not None:
-        payload["data"] = data
-
-    r = requests.post(LP_URL, json=payload, timeout=300)
-    time.sleep(1)  # throttle to avoid LastPass rate limiting
-    r.raise_for_status()
-
-    if not r.text.strip():
-        raise RuntimeError(f"LastPass {cmd}: empty response (check cid/provhash)")
-    try:
-        body = r.json()
-    except ValueError:
-        raise RuntimeError(f"LastPass {cmd}: non-JSON response: {r.text[:300]}")
-
-    if isinstance(body, dict) and body.get("status") == "FAIL":
-        raise RuntimeError(f"LastPass {cmd} error: {body}")
-    return body
+from pathlib import Path
+from datetime import date, datetime
 
 
-def _to_json_df(records: list[dict]) -> pd.DataFrame:
-    """One row per record, single column 'json'."""
-    json_rows = [json.dumps(r, sort_keys=True, default=str) for r in records]
-    return pd.DataFrame({"json": json_rows})
+def save_ndjson(df: pd.DataFrame, base_folder: str, run_date: date, file_name: str,
+                extension: str = ".json") -> Path:
+    """
+    Save a DataFrame of NDJSON records (one JSON string per row, single column)
+    to base_folder/YYYY/MM/DD/file_name<extension>.
+    base_folder must already exist. Date folders are created if needed. Existing file is overwritten.
+    """
+    base = Path(base_folder)
+    if not base.is_dir():
+        raise FileNotFoundError(f"Base folder does not exist: {base}")
 
+    if isinstance(run_date, datetime):
+        run_date = run_date.date()
 
-def fetch_lastpass_logs(cid: int, provhash: str, start: datetime, end: datetime,
-                        window_hours: int = 6, user: str = "", search: str = "") -> pd.DataFrame:
-    """Reporting events between start and end. Times are in the LastPass account timezone."""
-    records = []
-    t = start
-    while t < end:
-        t_end = min(t + timedelta(hours=window_hours), end)
-        data = {
-            "from": t.strftime("%Y-%m-%d %H:%M:%S"),
-            "to": t_end.strftime("%Y-%m-%d %H:%M:%S"),
-            "search": search,
-            "user": user,
-            "format": "siem",
-        }
-        while True:
-            body = _lp_post(cid, provhash, "reporting", data)
-            events = body.get("events") or body.get("data") or []
-            if isinstance(events, dict):
-                events = list(events.values())
-            for e in events:
-                e.pop("id", None)  # positional, not a real ID
-                records.append(e)
+    folder = base / f"{run_date:%Y}" / f"{run_date:%m}" / f"{run_date:%d}"
+    folder.mkdir(parents=True, exist_ok=True)
 
-            nxt = body.get("next")
-            if not nxt:
-                break
-            data["next"] = nxt
-        t = t_end
+    if not Path(file_name).suffix:
+        file_name = f"{file_name}{extension}"
+    path = folder / file_name
 
-    df = _to_json_df(records)
-    df = df.drop_duplicates().reset_index(drop=True)  # window edges can overlap
-    return df
+    json_column = df.columns[0]
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        for line in df[json_column]:
+            f.write(f"{line}\n")
 
-
-def fetch_lastpass_users(cid: int, provhash: str) -> pd.DataFrame:
-    """One record per user."""
-    body = _lp_post(cid, provhash, "getuserdata", {})
-    user_data = body.get("Users") or {}
-
-    records = []
-    for uid, u in user_data.items():
-        record = {"uid": uid}
-        record.update(u)
-        records.append(record)
-    return _to_json_df(records)
-
-
-def fetch_lastpass_groups(cid: int, provhash: str) -> pd.DataFrame:
-    """One record per group with its member list."""
-    body = _lp_post(cid, provhash, "getuserdata", {})
-    group_data = body.get("Groups") or {}
-
-    records = []
-    for groupname, members in group_data.items():
-        records.append({"groupname": groupname, "members": members or []})
-    return _to_json_df(records)
-
-
-def fetch_lastpass_folders(cid: int, provhash: str) -> pd.DataFrame:
-    """One record per shared folder, users and permissions nested."""
-    body = _lp_post(cid, provhash, "getsfdata")
-
-    records = []
-    for shareid, f in body.items():
-        if not isinstance(f, dict):
-            continue
-        record = {"shareid": shareid}
-        record.update(f)
-        records.append(record)
-    return _to_json_df(records)
-
-
-if __name__ == "__main__":
-    cid = 12345678
-    provhash = "YOUR_HASH"
-    end = datetime.now()
-    start = end - timedelta(days=1)
-
-    logs = fetch_lastpass_logs(cid, provhash, start, end)
-    users = fetch_lastpass_users(cid, provhash)
-    groups = fetch_lastpass_groups(cid, provhash)
-    folders = fetch_lastpass_folders(cid, provhash)
-
-    print(logs.head())
-    print(users.head())
-    print(groups.head())
-    print(folders.head())
+    return path
