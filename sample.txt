@@ -1,27 +1,27 @@
-let targetUser = "user@contoso.com";
-let includedDevices = dynamic(["LAPTOP-ABC123", "DESKTOP-XYZ789"]);   // device display names
-SigninLogs
-| where TimeGenerated > ago(365d)
-| where UserPrincipalName =~ targetUser
-| where ResultType == "0"   // successful only
-| extend DeviceName = tostring(DeviceDetail.displayName),
-         DeviceId   = tostring(DeviceDetail.deviceId)
-| where DeviceName in~ (includedDevices)
-| extend LocalTime = datetime_utc_to_local(TimeGenerated, "America/Los_Angeles"),
-         City      = tostring(LocationDetails.city),
-         State     = tostring(LocationDetails.state),
-         Country   = tostring(LocationDetails.countryOrRegion),
-         Device    = strcat(DeviceName, " (", tostring(DeviceDetail.operatingSystem), ")")
-| summarize FirstLoginPT = min(LocalTime),
-            LastLoginPT  = max(LocalTime),
-            Logins       = count(),
-            IPs          = make_set(IPAddress, 10),
-            Devices      = make_set(Device, 10)
-          by DayPT = startofday(LocalTime), City, State, Country
-| order by DayPT desc
-| project DayPT        = format_datetime(DayPT, "yyyy-MM-dd"),
-          FirstLoginPT = format_datetime(FirstLoginPT, "yyyy-MM-dd HH:mm:ss"),
-          LastLoginPT  = format_datetime(LastLoginPT, "yyyy-MM-dd HH:mm:ss"),
-          City, State, Country, Logins,
-          IPs     = strcat_array(IPs, ", "),
-          Devices = strcat_array(Devices, ", ")
+try:
+        content = si.RetrieveContent()
+        view = content.viewManager.CreateContainerView(
+            content.rootFolder, [vim.VirtualMachine], True)
+
+        rows = []
+        for vm in view.view:
+            if not vm.snapshot:
+                continue
+            size = snapshot_size_gb(vm)
+            for row in walk_snapshots(vm.snapshot.rootSnapshotList, vm):
+                row["vm_snapshot_total_gb"] = size
+                rows.append(row)
+        view.Destroy()
+
+        rows.sort(key=lambda r: r["created"])
+        for r in rows:
+            print(f"{r['vm']:<30} {r['snapshot']:<35} {r['created']:%Y-%m-%d %H:%M}  "
+                  f"{r['age_days']:>4}d  {r['vm_snapshot_total_gb']:>7} GB")
+
+        if rows:
+            with open("snapshots.csv", "w", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+    finally:
+        Disconnect(si)
