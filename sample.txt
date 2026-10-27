@@ -1,27 +1,69 @@
-try:
-        content = si.RetrieveContent()
-        view = content.viewManager.CreateContainerView(
-            content.rootFolder, [vim.VirtualMachine], True)
+import getpass
+from datetime import datetime, timezone
 
-        rows = []
-        for vm in view.view:
-            if not vm.snapshot:
-                continue
-            size = snapshot_size_gb(vm)
-            for row in walk_snapshots(vm.snapshot.rootSnapshotList, vm):
-                row["vm_snapshot_total_gb"] = size
-                rows.append(row)
-        view.Destroy()
+import pandas as pd
 
-        rows.sort(key=lambda r: r["created"])
-        for r in rows:
-            print(f"{r['vm']:<30} {r['snapshot']:<35} {r['created']:%Y-%m-%d %H:%M}  "
-                  f"{r['age_days']:>4}d  {r['vm_snapshot_total_gb']:>7} GB")
+from pyVim.connect import SmartConnect, Disconnect
+from pyVmomi import vim
 
-        if rows:
-            with open("snapshots.csv", "w", newline="") as fh:
-                writer = csv.DictWriter(fh, fieldnames=rows[0].keys())
-                writer.writeheader()
-                writer.writerows(rows)
-    finally:
-        Disconnect(si)
+VCENTER = "vcenter.yourdomain.local"
+USER = input("Username: ")
+PASSWORD = getpass.getpass("Password: ")
+
+si = SmartConnect(host=VCENTER, user=USER, pwd=PASSWORD,
+                  disableSslCertValidation=True)
+
+content = si.RetrieveContent()
+view = content.viewManager.CreateContainerView(
+    content.rootFolder, [vim.VirtualMachine], True)
+
+now = datetime.now(timezone.utc)
+rows = []
+
+for vm in view.view:
+    if not vm.snapshot:
+        continue
+
+    # Total snapshot footprint for this VM (delta disks + snapshot files)
+    size_bytes = 0
+    if vm.layoutEx:
+        for f in vm.layoutEx.file:
+            if f.type in ("snapshotData", "snapshotMemory") or (
+                f.type == "diskExtent" and "-0000" in f.name
+            ):
+                size_bytes += f.size
+    size_gb = round(size_bytes / 1024**3, 2)
+
+    # Snapshots form a tree; walk it with a stack instead of recursion
+    stack = [(s, None) for s in vm.snapshot.rootSnapshotList]
+    while stack:
+        snap, parent = stack.pop()
+        rows.append({
+            "VM": vm.name,
+            "Snapshot": snap.name,
+            "Description": snap.description,
+            "Created": snap.createTime.strftime("%Y-%m-%d %H:%M"),
+            "AgeDays": (now - snap.createTime).days,
+            "Parent": parent or "",
+            "IncludesMemory": snap.state == "poweredOn",
+            "Quiesced": snap.quiesced,
+            "PowerState": vm.runtime.powerState,
+            "Host": vm.runtime.host.name if vm.runtime.host else "",
+            "VMSnapshotTotalGB": size_gb,
+        })
+        for child in snap.childSnapshotList:
+            stack.append((child, snap.name))
+
+view.Destroy()
+Disconnect(si)
+
+df = pd.DataFrame(rows)
+
+if df.empty:
+    print("No snapshots found.")
+else:
+    df = df.sort_values("Created").reset_index(drop=True)
+    pd.set_option("display.width", 200)
+    pd.set_option("display.max_columns", None)
+    print(df.head(5))
+    print(f"\n{len(df)} snapshot(s) total.")
