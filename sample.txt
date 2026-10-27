@@ -1,13 +1,17 @@
 let targetUser = "user@contoso.com";
+let includedDevices = dynamic(["LAPTOP-ABC123", "DESKTOP-XYZ789"]);   // device display names
 SigninLogs
 | where TimeGenerated > ago(365d)
 | where UserPrincipalName =~ targetUser
 | where ResultType == "0"   // successful only
+| extend DeviceName = tostring(DeviceDetail.displayName),
+         DeviceId   = tostring(DeviceDetail.deviceId)
+| where DeviceName in~ (includedDevices)
 | extend LocalTime = datetime_utc_to_local(TimeGenerated, "America/Los_Angeles"),
          City      = tostring(LocationDetails.city),
          State     = tostring(LocationDetails.state),
          Country   = tostring(LocationDetails.countryOrRegion),
-         Device    = strcat(tostring(DeviceDetail.displayName), " (", tostring(DeviceDetail.operatingSystem), ")")
+         Device    = strcat(DeviceName, " (", tostring(DeviceDetail.operatingSystem), ")")
 | summarize FirstLoginPT = min(LocalTime),
             LastLoginPT  = max(LocalTime),
             Logins       = count(),
@@ -15,3 +19,9 @@ SigninLogs
             Devices      = make_set(Device, 10)
           by DayPT = startofday(LocalTime), City, State, Country
 | order by DayPT desc
+| project DayPT        = format_datetime(DayPT, "yyyy-MM-dd"),
+          FirstLoginPT = format_datetime(FirstLoginPT, "yyyy-MM-dd HH:mm:ss"),
+          LastLoginPT  = format_datetime(LastLoginPT, "yyyy-MM-dd HH:mm:ss"),
+          City, State, Country, Logins,
+          IPs     = strcat_array(IPs, ", "),
+          Devices = strcat_array(Devices, ", ")
