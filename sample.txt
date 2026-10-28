@@ -1,69 +1,9 @@
-import getpass
-from datetime import datetime, timezone
-
-import pandas as pd
-
-from pyVim.connect import SmartConnect, Disconnect
-from pyVmomi import vim
-
-VCENTER = "vcenter.yourdomain.local"
-USER = input("Username: ")
-PASSWORD = getpass.getpass("Password: ")
-
-si = SmartConnect(host=VCENTER, user=USER, pwd=PASSWORD,
-                  disableSslCertValidation=True)
-
-content = si.RetrieveContent()
-view = content.viewManager.CreateContainerView(
-    content.rootFolder, [vim.VirtualMachine], True)
-
-now = datetime.now(timezone.utc)
-rows = []
-
-for vm in view.view:
-    if not vm.snapshot:
-        continue
-
-    # Total snapshot footprint for this VM (delta disks + snapshot files)
-    size_bytes = 0
-    if vm.layoutEx:
-        for f in vm.layoutEx.file:
-            if f.type in ("snapshotData", "snapshotMemory") or (
-                f.type == "diskExtent" and "-0000" in f.name
-            ):
-                size_bytes += f.size
-    size_gb = round(size_bytes / 1024**3, 2)
-
-    # Snapshots form a tree; walk it with a stack instead of recursion
-    stack = [(s, None) for s in vm.snapshot.rootSnapshotList]
-    while stack:
-        snap, parent = stack.pop()
-        rows.append({
-            "VM": vm.name,
-            "Snapshot": snap.name,
-            "Description": snap.description,
-            "Created": snap.createTime.strftime("%Y-%m-%d %H:%M"),
-            "AgeDays": (now - snap.createTime).days,
-            "Parent": parent or "",
-            "IncludesMemory": snap.state == "poweredOn",
-            "Quiesced": snap.quiesced,
-            "PowerState": vm.runtime.powerState,
-            "Host": vm.runtime.host.name if vm.runtime.host else "",
-            "VMSnapshotTotalGB": size_gb,
-        })
-        for child in snap.childSnapshotList:
-            stack.append((child, snap.name))
-
-view.Destroy()
-Disconnect(si)
-
-df = pd.DataFrame(rows)
-
-if df.empty:
-    print("No snapshots found.")
-else:
-    df = df.sort_values("Created").reset_index(drop=True)
-    pd.set_option("display.width", 200)
-    pd.set_option("display.max_columns", None)
-    print(df.head(5))
-    print(f"\n{len(df)} snapshot(s) total.")
+SELECT 
+    dp.permission_name, 
+    dp.state_desc, 
+    o.name AS object_name, 
+    pr.name AS grantee_principal_name
+FROM sys.database_permissions dp
+JOIN sys.objects o ON dp.major_id = o.object_id
+JOIN sys.database_principals pr ON dp.grantee_principal_id = pr.principal_id
+WHERE o.name = 'TheFailingViewName';
