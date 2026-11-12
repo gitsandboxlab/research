@@ -1,9 +1,31 @@
-SELECT 
-    dp.permission_name, 
-    dp.state_desc, 
-    o.name AS object_name, 
-    pr.name AS grantee_principal_name
-FROM sys.database_permissions dp
-JOIN sys.objects o ON dp.major_id = o.object_id
-JOIN sys.database_principals pr ON dp.grantee_principal_id = pr.principal_id
-WHERE o.name = 'TheFailingViewName';
+import csv
+import ipaddress
+
+INPUT = "qualys_ips.csv"
+OUTPUT = "ips_expanded.csv"
+IP_COLUMN = "IP"   # change to your column header
+
+def expand(entry):
+    entry = entry.strip()
+    if not entry:
+        return []
+    if "-" in entry:
+        start, end = (ipaddress.ip_address(x.strip()) for x in entry.split("-"))
+        return [str(ipaddress.ip_address(i)) for i in range(int(start), int(end) + 1)]
+    if "/" in entry:
+        return [str(ip) for ip in ipaddress.ip_network(entry, strict=False)]
+    return [str(ipaddress.ip_address(entry))]
+
+ips = []
+with open(INPUT, newline="", encoding="utf-8-sig") as f:
+    for row in csv.DictReader(f):
+        for part in row[IP_COLUMN].split(","):
+            ips.extend(expand(part))
+
+with open(OUTPUT, "w", newline="") as f:
+    w = csv.writer(f)
+    w.writerow(["IP"])
+    for ip in sorted(set(ips), key=ipaddress.ip_address):
+        w.writerow([ip])
+
+print(f"{len(ips)} IPs written to {OUTPUT}")
