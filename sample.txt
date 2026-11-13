@@ -1,105 +1,21 @@
-# Project conventions
+---
+mode: agent
+description: Scaffold a new flow matching existing patterns
+---
+Create a new flow for source `${input:source}` and object `${input:object}` that ${input:purpose}.
+File: `flows/alpha/${input:source}_${input:object}_flow.py`
+Prefect Blocks (secrets) to use: ${input:blocks:Block names, or none}
 
-## Terms
-- **Flow** = the orchestrating script for a job. Do not call it a controller.
-- **Function** = reusable logic in `lib/<verb>/<function_name>.py`.
-
-## Naming
-- Flow file: `<source>_<object>_flow.py` (e.g. `corebanking_loans_flow.py`).
-  Every flow file name ALWAYS ends with `_flow.py`.
-- Use the source and object names given in the request exactly. Do not invent or
-  rename them. If either is missing, ask before creating files.
-
-## Folder structure
-- Flows are ALWAYS exactly two levels deep: `flows/<area>/<source>_<object>_flow.py`.
-  No per-flow subfolder.
-- Existing flows in `flows/<area>/` are reference only. Do not modify them.
-- NEW flows are always created as `flows/alpha/<source>_<object>_flow.py`.
-  Never create a new `<area>` folder and never put a new flow in an existing area folder.
-- Library functions live in `lib/<verb>/<function_name>.py`, grouped by verb
-  (e.g. `lib/extract/`, `lib/load/`, `lib/validate/`, `lib/convert/`).
-- Use absolute imports from repo root so flows can be moved without edits:
-  `from lib.<verb>.<function_name> import <function_name>`
-
-## Flow pattern
-- A flow orchestrates only. It contains NO business logic.
-- Every step calls a function from `lib/`. Search `lib/` by verb before writing anything new.
-- After each step, run a validation check before moving to the next step.
-  - Use existing functions in `lib/validate/` where they exist.
-  - On failure: log the reason and stop the flow (raise). Do not continue to the next step.
-- When a function must run for multiple values, loop over the values in the flow
-  and call the same `lib/` function for each one. Do not write a new function for the batch.
-  - Validate each iteration's result the same way as a single step.
-- Follow the exact step -> validate -> next step order used in the reference flow.
-
-## Missing functions: ASK FIRST
-- If a needed function does not exist in `lib/`, STOP and ask before writing any code.
-- Never create or modify a `lib/` function without approval.
-- NEVER create a new `lib/<verb>/` folder. New functions must go in an existing verb
-  folder. If none fits, say so and ask me where it belongs.
-- For each missing function, propose:
-  1. **Extend existing**: the closest existing function, what change (new parameter,
-     option, etc.) would cover the need, and whether it affects existing flows that use it.
-  2. **Create new**: proposed `lib/<existing_verb>/<function_name>.py`, its signature, inputs/outputs.
-  3. Your recommendation and why.
-- Wait for my answer, then proceed with the option I choose.
-- Never work around a missing function by putting the logic inside the flow.
-
-## Configuration (Prefect Variables)
-- Values that can change are stored in Prefect Variables, never hardcoded in the flow.
-- Every flow has a config variable named exactly as the flow file name without `.py`,
-  plus `__config` (double underscore): `<source>_<object>_flow__config`.
-  Example: `prefect_fetch_flow.py` -> `prefect_fetch_flow__config`.
-- Read the config at the very start of the flow, before any other step, the same way
-  the reference flow does.
-- Every config has `"enabled": 0 | 1`.
-  - If `enabled` is 0: `log_info` that the flow is disabled and return immediately.
-    Do not run any steps.
-  - Only continue when `enabled` is 1.
-- Pass config values into `lib/` functions as parameters. Functions do not read
-  Prefect Variables themselves.
-- If a new flow needs a config key that does not exist yet, list it in the plan and ask.
-- I create the config variable ahead of time. Never create, modify, or delete
-  Prefect Variables yourself.
-
-## Secrets (Prefect Blocks)
-- All secrets and credentials are stored in Prefect Blocks. Never hardcode them, and
-  never read them from env vars, files, or Prefect Variables.
-- Block names are named for what the secret or credential is for.
-- I will give you the exact Block names a flow needs, and I create them ahead of time.
-  - Use the names I give you exactly. Never guess or invent a Block name.
-  - If a flow needs a secret and I did not give you a Block name, STOP and ask.
-- Never create, modify, or delete Prefect Blocks yourself.
-- Load Blocks the same way the reference flow does, then pass the values into
-  `lib/` functions as parameters. Never log secret values.
-
-## Row data
-- Rows of data are always held in a pandas DataFrame.
-- Load data into a DataFrame first, then pass the DataFrame to `lib/` functions.
-- Do not pass lists of dicts, tuples, or cursors between steps.
-- Do not loop over DataFrame rows in the flow (`iterrows`, `itertuples`). Use vectorized
-  pandas operations inside `lib/` functions.
-- Convert to other formats (e.g. NDJSON) only at the step that needs it, using the
-  existing `lib/` conversion function. NDJSON = `df.to_json(orient="records", lines=True)`.
-- Validation functions take the DataFrame (e.g. row count, required columns, nulls).
-
-## Logging
-- Use ONLY the custom logging functions: `log_info`, `log_warning`, `log_error`, `log_flow`
-  (in `lib/<log_verb>/`).
-- Never use `get_run_logger()`, `print()`, or Python's `logging` module directly.
-- `log_info` = normal progress, `log_warning` = recoverable issues, `log_error` = failures
-  (always before raising).
-- `log_flow` records each step for the auto-generated Mermaid diagram.
-  - Call `log_flow` at every step, validation, and loop, exactly as the reference flow does.
-  - Match the reference flow's arguments and step labels so the diagram renders correctly.
-  - A step without `log_flow` will be missing from the diagram.
-
-## Reference implementation
-- Model new flows on `flows/<area>/<best_example>_flow.py`.
-- Match its imports, logging, validation, looping, DataFrame handling, error handling,
-  parameter style, and deployment setup.
-
-## Standards
-- Connections: use the existing `lib/` connection function, passing credentials loaded
-  from Prefect Blocks.
-- SQL Server access only through `lib/` functions.
+1. Read #file:flows/<area>/<best_example>_flow.py as the template.
+2. Inventory the functions in `lib/<verb>/` folders and reuse them.
+3. BEFORE writing code, list:
+   - each step, the `lib/<verb>/<function_name>` it calls, and the validation after it
+   - where data is loaded into a DataFrame and any format conversions (e.g. NDJSON)
+   - the config keys the flow reads from `${input:source}_${input:object}_flow__config`
+   - each Prefect Block it loads and which step uses it
+   - any step that loops, and what values it loops over
+   - any missing functions, each with an "extend existing" vs "create new" option
+     and your recommendation
+4. STOP and wait for my approval of the plan and my choice for each missing function.
+5. After approval, generate the flow file and deployment config at the path above,
+   using the same step -> validate -> next step structure as the template.
