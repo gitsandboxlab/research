@@ -103,4 +103,3 @@
 - Connections: use the existing `lib/` connection function, passing credentials loaded
   from Prefect Blocks.
 - SQL Server access only through `lib/` functions.
-
